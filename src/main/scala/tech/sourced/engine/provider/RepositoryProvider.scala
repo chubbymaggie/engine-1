@@ -2,20 +2,18 @@ package tech.sourced.engine.provider
 
 import java.io.File
 import java.nio.file.Paths
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.commons.io.FileUtils
+import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericKeyedObjectPool}
+import org.apache.commons.pool2.{BaseKeyedPooledObjectFactory, PooledObject}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
-import org.apache.spark.input.PortableDataStream
 import org.apache.spark.internal.Logging
 import org.eclipse.jgit.lib.{Repository, RepositoryBuilder}
 import tech.sourced.engine.util.MD5Gen
 import tech.sourced.siva.SivaReader
 
 import scala.collection.JavaConverters._
-import scala.collection.concurrent
 
 /**
   * Generates repositories from siva files at the given local path and keeps a reference count
@@ -24,63 +22,37 @@ import scala.collection.concurrent
   * @param localPath   Local path where siva files are.
   * @param skipCleanup Skip deleting files after they reference count of a repository gets to 0.
   */
-class RepositoryProvider(val localPath: String, val skipCleanup: Boolean = false) extends Logging {
+class RepositoryProvider(val localPath: String, val skipCleanup: Boolean = false)
+  extends Logging {
+  private val repositoryObjectFactory =
+    new RepositoryObjectFactory(localPath, skipCleanup)
+  private val repositoryPool =
+    new GenericKeyedObjectPool[RepositoryKey, Repository](repositoryObjectFactory)
+
+  repositoryPool.setMaxTotalPerKey(5)
+  repositoryPool.setMaxIdlePerKey(4)
+  repositoryPool.setBlockWhenExhausted(true)
 
   /**
-    * Map to keep track of all the repository instances open.
-    */
-  private val repositories: concurrent.Map[String, Repository] =
-    new ConcurrentHashMap[String, Repository]().asScala
-
-  /**
-    * Map to keep track of the reference count of all repositories.
-    */
-  private val repoRefCounts: concurrent.Map[String, AtomicInteger] =
-    new ConcurrentHashMap[String, AtomicInteger]().asScala
-
-  /**
-    * Thread-safe method to get a repository given an HDFS configuration and its path.
-    * The count of the given repository is incremented by one.
+    * Thread-safe method to get a repository given a repository key.
     *
-    * @param conf HDFS configuration
-    * @param path Repository path
+    * @param key Repository key
     * @return Repository
     */
-  def get(conf: Configuration, path: String): Repository = synchronized {
-    this.incrCounter(path)
-    repositories.get(path) match {
-      case Some(repo) => {
-        repo.incrementOpen()
-        repo
-      }
-      case None => {
-        val repo = genRepository(conf, path, localPath)
-        repositories.put(path, repo)
-        repo
-      }
-    }
+  def get(key: RepositoryKey): Repository = {
+    logDebug(s"Getting new repository instance. active/idle count: " +
+      s"${repositoryPool.getNumActive(key)}/ " +
+      s"${repositoryPool.getNumIdle(key)}")
+    repositoryPool.borrowObject(key)
   }
 
   /**
-    * Increments the reference count of the repository at the given path by one.
+    * Returns a repository corresponding to the given [[RepositorySource]].
     *
-    * @param path Repository path
-    */
-  private def incrCounter(path: String): Unit = {
-    repoRefCounts.get(path) match {
-      case Some(counter) => counter.incrementAndGet()
-      case None => repoRefCounts.put(path, new AtomicInteger(1))
-    }
-  }
-
-  /**
-    * Returns a repository corresponding to the given [[PortableDataStream]].
-    *
-    * @param pds Portable Data Stream
+    * @param source Repository source
     * @return Repository
     */
-  def get(pds: PortableDataStream): Repository =
-    this.get(pds.getConfiguration, pds.getPath())
+  def get(source: RepositorySource): Repository = this.get(RepositoryProvider.keyForSource(source))
 
   /**
     * Closes a repository with the given path. All the repositories are ref-counted
@@ -88,36 +60,114 @@ class RepositoryProvider(val localPath: String, val skipCleanup: Boolean = false
     * active.
     * This method is thread-safe.
     *
-    * @param path Repository path
+    * @param source Repository source
+    * @param repo   The previously obtained Repository instance
     */
-  def close(path: String): Unit = synchronized {
-    repositories.get(path).foreach(r => {
-      log.debug(s"Close $path")
-      r.close()
+  def close(source: RepositorySource, repo: Repository): Unit = {
+    val key = RepositoryProvider.keyForSource(source)
+    logDebug(s"Closing repository. active/idle count: " +
+      s"${repositoryPool.getNumActive(key)}/ " +
+      s"${repositoryPool.getNumIdle(key)}")
 
-      val counter = repoRefCounts.getOrElse(path, new AtomicInteger(1))
-      if (counter.decrementAndGet() <= 0) {
-        if (!skipCleanup) {
-          log.debug(s"Deleting unpacked files for $path at ${r.getDirectory}")
-          FileUtils.deleteQuietly(r.getDirectory)
-        }
-        repositories.remove(path)
-        repoRefCounts.remove(path)
-      }
-    })
+    if (repositoryPool.getNumActive(key) != 0) {
+      repositoryPool.returnObject(key, repo)
+    } else {
+      logWarning(s"closing repository at ${repo.getDirectory};" +
+        s" returning object to the pool failed because it was already returned")
+    }
+
+    if (repositoryPool.getNumActive == 0) {
+      logDebug("No active elements on the pool, clearing all.")
+      repositoryPool.clear()
+    }
+  }
+}
+
+class RepositoryObjectFactory(val localPath: String, val skipCleanup: Boolean)
+  extends BaseKeyedPooledObjectFactory[RepositoryKey, Repository]
+    with Logging {
+
+  override def create(key: RepositoryKey): Repository = key match {
+    case RepositoryKey(conf, path, false, true) =>
+      genSivaRepository(conf, path, localPath)
+    case RepositoryKey(conf, path, true, false) =>
+      genRepository(conf, path, localPath, isBare = true)
+    case RepositoryKey(conf, path, _, _) =>
+      genRepository(conf, path, localPath, isBare = false)
+  }
+
+  override def wrap(value: Repository): PooledObject[Repository] =
+    new DefaultPooledObject[Repository](value)
+
+  override def destroyObject(key: RepositoryKey, p: PooledObject[Repository]): Unit = {
+    val r = p.getObject
+    r.close()
+    if (!skipCleanup && r.getDirectory.toString.startsWith(localPath)) {
+      logDebug(s"Deleting unpacked files for ${key.path} at ${r.getDirectory}")
+      FileUtils.deleteQuietly(r.getDirectory)
+    }
   }
 
   /**
-    * Generates a repository with the given configuration and paths.
+    * Generates a repository from a repository that is not a siva file.
+    *
+    * @param conf      hadoop configuration
+    * @param path      repository path
+    * @param localPath local path
+    * @param isBare    is it a bare repository?
+    * @return generated repository
+    */
+  private[provider] def genRepository(conf: Configuration,
+                                      path: String,
+                                      localPath: String,
+                                      isBare: Boolean): Repository = {
+    val remotePath = new Path(path)
+    val fs = remotePath.getFileSystem(conf)
+
+    val (localRepoPath, isLocalPath) = if (!path.startsWith("file:")) {
+      val localRepoPath = new Path(
+        localPath,
+        new Path(
+          RepositoryProvider.temporalLocalFolder,
+          new Path(MD5Gen.str(path), remotePath.getName)
+        )
+      )
+      if (!fs.exists(localRepoPath)) {
+        import RepositoryProvider.HadoopFsRecursiveCopier
+        fs.copyToLocalDir(new Path(path), localRepoPath)
+      }
+
+      (localRepoPath, false)
+    } else {
+      (new Path(path.substring(5)), true)
+    }
+
+    val repo = new RepositoryBuilder().setGitDir(if (isBare) {
+      new File(localRepoPath.toString)
+    } else {
+      new File(localRepoPath.toString, ".git")
+    }).build()
+
+    if (!skipCleanup && !isLocalPath) {
+      log.debug(s"Delete $localRepoPath")
+      FileUtils.deleteQuietly(Paths.get(localRepoPath.toString).toFile)
+    }
+
+    repo
+  }
+
+
+  /**
+    * Generates a repository coming from a siva file with the given configuration and paths.
     *
     * @param conf      HDFS configuration
     * @param path      Remote repository path
     * @param localPath local path where rooted repositories are downloaded from the remote FS
     * @return Repository
     */
-  private[provider] def genRepository(conf: Configuration,
-                                      path: String,
-                                      localPath: String): Repository = {
+  private[provider] def genSivaRepository(conf: Configuration,
+                                          path: String,
+                                          localPath: String): Repository = {
     val remotePath = new Path(path)
 
     val localUnpackedPath =
@@ -199,6 +249,64 @@ object RepositoryProvider {
     provider
   }
 
+  /**
+    * Returns the repository key for the given repository source.
+    *
+    * @param source repository source
+    * @return key
+    */
+  def keyForSource(source: RepositorySource): RepositoryKey = source match {
+    case SivaRepository(pds) => RepositoryKey(
+      pds.getConfiguration,
+      pds.getPath,
+      isBare = false,
+      isSiva = true)
+    case BareRepository(root, pds) => RepositoryKey(
+      pds.getConfiguration,
+      root,
+      isBare = true,
+      isSiva = false
+    )
+    case GitRepository(root, pds) => RepositoryKey(
+      pds.getConfiguration,
+      root,
+      isBare = false,
+      isSiva = false
+    )
+  }
+
+
+  /**
+    * Little wrapper around Hadoop File System to copy all folder files to the local
+    * file system.
+    *
+    * @param fs hadoop file system
+    */
+  implicit class HadoopFsRecursiveCopier(fs: FileSystem) {
+
+    /**
+      * Recursively copy a directory to a local directory
+      *
+      * @param src source directory path
+      * @param dst destination directory path
+      */
+    def copyToLocalDir(src: Path, dst: Path): Unit = {
+      val iter = fs.listFiles(src, true)
+      while (iter.hasNext) {
+        val f = iter.next
+        val dstPath = new Path(dst.toString, f.getPath.toString.substring(src.toString.length))
+        fs.copyToLocalFile(f.getPath, dstPath)
+      }
+
+    }
+
+  }
+
   val temporalLocalFolder = "processing-repositories"
   val temporalSivaFolder = "siva-files"
 }
+
+protected case class RepositoryKey(conf: Configuration,
+                                   path: String,
+                                   isBare: Boolean,
+                                   isSiva: Boolean)

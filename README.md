@@ -1,6 +1,6 @@
-# source{d} Engine [![Build Status](https://travis-ci.org/src-d/engine.svg?branch=master)](https://travis-ci.org/src-d/engine) [![codecov](https://codecov.io/gh/src-d/engine/branch/master/graph/badge.svg)](https://codecov.io/gh/src-d/engine) [![Maven Central](https://maven-badges.herokuapp.com/maven-central/tech.sourced/engine/badge.svg)](https://maven-badges.herokuapp.com/maven-central/tech.sourced/engine)
+# engine [![Build Status](https://travis-ci.org/src-d/engine.svg?branch=master)](https://travis-ci.org/src-d/engine) [![codecov](https://codecov.io/gh/src-d/engine/branch/master/graph/badge.svg)](https://codecov.io/gh/src-d/engine) [![Maven Central](https://maven-badges.herokuapp.com/maven-central/tech.sourced/engine/badge.svg)](https://maven-badges.herokuapp.com/maven-central/tech.sourced/engine)
 
-**source{d} Engine** is a library for running scalable data retrieval pipelines that process any number of Git repositories for source code analysis.
+**engine** is a library for running scalable data retrieval pipelines that process any number of Git repositories for source code analysis.
 
 It is written in Scala and built on top of Apache Spark to enable rapid construction of custom analysis pipelines and processing large number of Git repositories stored in HDFS in [Siva file format](https://github.com/src-d/go-siva). It is accessible both via Scala and Python Spark APIs, and capable of running on large-scale distributed clusters.
 
@@ -14,33 +14,6 @@ Current implementation combines:
 
 # Quick-start
 
-Look for the latest [***source{d} engine*** version](http://search.maven.org/#search%7Cga%7C1%7Ctech.sourced), and then replace in the command where `[version]` is showed:
-
-```bash
-$ wget "https://www.apache.org/dyn/mirrors/mirrors.cgi?action=download&filename=spark/spark-2.2.0/spark-2.2.0-bin-hadoop2.7.tgz" -O spark-2.2.0-bin-hadoop2.7.tgz
-$ tar -xzf spark-2.2.0-bin-hadoop2.7.tgz; cd spark-2.2.0-bin-hadoop2.7
-$ ./bin/spark-shell --packages "tech.sourced:engine:[version]"
-
-# or
-$ ./bin/pyspark --packages "tech.sourced:engine:[version]"
-```
-
-Run [bblfsh daemon](https://github.com/bblfsh/bblfshd):
-
-    docker create --rm --name bblfshd --privileged -p 9432:9432 -v /var/lib/bblfshd:/var/lib/bblfshd bblfsh/bblfshd:v2.1.2
-
-Then, execute the container:
-
-    docker start bblfshd
-
-Install bblfsh drivers:
-
-    docker exec -it bblfshd bblfshctl driver install --all
-
-# Pre-requisites
-
-## Apache Spark Installation
-
 First, you need to download [Apache Spark](https://spark.apache.org/) somewhere on your machine:
 
 ```bash
@@ -53,40 +26,36 @@ Then you must extract `Spark` from the downloaded tar file:
 ```bash
 $ tar -C ~/ -xvzf spark-2.2.0-bin-hadoop2.7.tgz
 ```
-Binaries and scripts to run `Spark` are located in spark-2.2.0-bin-hadoop2.7/bin, so maybe you would like to add it to your `PATH`:
 
-```bash
-$ export PATH=$PATH:$HOME/spark-2.2.0-bin-hadoop2.7/bin
-```
-
-or just set `SPARK_HOME` and run it as following:
+Binaries and scripts to run `Spark` are located in spark-2.2.0-bin-hadoop2.7/bin, so should set `PATH` and `SPARK_HOME` to point to this directory. It's advised to add this to your shell profile:
 
 ```bash
 $ export SPARK_HOME=$HOME/spark-2.2.0-bin-hadoop2.7
-$ $SPARK_HOME/bin/spark-shell
+$ export PATH=$PATH:$SPARK_HOME/bin
 ```
 
-## bblfsh
+Look for the latest [**engine** version](http://search.maven.org/#search%7Cga%7C1%7Ctech.sourced), and then replace in the command where `[version]` is showed:
 
-If you want to be able to use the UAST extraction features source{d} engine provides, you must run a [bblfsh daemon](https://github.com/bblfsh/bblfshd). You can do it easily with docker
+```bash
+$ spark-shell --packages "tech.sourced:engine:[version]"
 
-    docker create --rm --name bblfshd --privileged -p 9432:9432 -v /var/lib/bblfshd:/var/lib/bblfshd bblfsh/bblfshd:v2.1.2
+# or
 
-Now, execute the container:
+$ pyspark --packages "tech.sourced:engine:[version]"
+```
 
-    docker start bblfshd
+Run [bblfsh daemon](https://github.com/bblfsh/bblfshd). You can start it easily in a container following its [quick start guide](https://github.com/bblfsh/bblfshd#quick-start).
 
-Then you need to install bblfsh drivers to parse different languages, you should do this the first time you run the [bblfsh daemon](https://github.com/bblfsh/bblfshd):
 
-    docker exec -it bblfshd bblfshctl driver install --all
+# Pre-requisites
 
-You should be able to see the installed drivers running:
+* Scala 2.11.x
+* [Apache Spark Installation](http://spark.apache.org/docs/latest/) >= 2.2.0
+* [bblfsh](https://github.com/bblfsh/bblfshd): Used for UAST extraction
 
-    docker exec -it bblfshd bblfshctl driver list
+# Examples of engine usage
 
-# Examples of source{d} Engine usage
-
-***source{d} Engine*** is available on [maven central](https://search.maven.org/#search%7Cga%7C1%7Ctech.sourced.engine). To add it to your project as a dependency,
+**engine** is available on [maven central](https://search.maven.org/#search%7Cga%7C1%7Ctech.sourced.engine). To add it to your project as a dependency,
 
 For projects managed by [maven](https://maven.apache.org/) add the following to your `pom.xml`:
 
@@ -104,17 +73,53 @@ For [sbt](http://www.scala-sbt.org/) managed projects add the dependency:
 
 In both cases, replace `[version]` with the [latest engine version](http://search.maven.org/#search%7Cga%7C1%7Ctech.sourced)
 
+### Usage in applications as a dependency
+
+The default jar published is a fatjar containing all the dependencies required by the engine. It's meant to be used directly as a jar or through `--packages` for Spark usage.
+
+If you want to use it in an application and built a fatjar with that you need to follow these steps to use what we call the "slim" jar:
+
+With maven:
+
+```xml
+<dependency>
+    <groupId>tech.sourced</groupId>
+    <artifactId>engine</artifactId>
+    <version>[version]</version>
+    <classifier>slim</classifier>
+</dependency>
+```
+
+Or (for sbt):
+
+```scala
+libraryDependencies += "tech.sourced" % "engine" % "[version]" % Compile classifier "slim"
+```
+
+If you run into problems with `io.netty.versions.properties` on sbt, you can add the following snippet to solve it:
+
+In sbt:
+
+```scala
+assemblyMergeStrategy in assembly := {
+  case "META-INF/io.netty.versions.properties" => MergeStrategy.last
+  case x =>
+    val oldStrategy = (assemblyMergeStrategy in assembly).value
+    oldStrategy(x)
+}
+```
+
 ## pyspark
 
 ### Local mode
 
-Install python-wrappers is necessary to use source{d} engine from pyspark:
+Install python-wrappers is necessary to use **engine** from pyspark:
 
 ``` bash
 $ pip install sourced-engine
 ```
 
-Then you should provide the `source{d} Engine`'s maven coordinates to the pyspark's shell:
+Then you should provide the **engine's** maven coordinates to the pyspark's shell:
 ```bash
 $ $SPARK_HOME/bin/pyspark --packages "tech.sourced:engine:[version]"
 ```
@@ -122,7 +127,7 @@ Replace `[version]` with the [latest engine version](http://search.maven.org/#se
 
 ### Cluster mode
 
-Install `source{d} Engine` wrappers as in local mode:
+Install **engine** wrappers as in local mode:
 ```bash
 $ pip install -e sourced-engine
 ```
@@ -159,13 +164,13 @@ SparkSession available as 'spark'.
 
 ## Scala API usage
 
-You must provide ***source{d} Engine***  as a dependency in the following way, replacing `[version]` with the [latest engine version](http://search.maven.org/#search%7Cga%7C1%7Ctech.sourced):
+You must provide **engine** as a dependency in the following way, replacing `[version]` with the [latest engine version](http://search.maven.org/#search%7Cga%7C1%7Ctech.sourced):
 
 ```bash
 $ spark-shell --packages "tech.sourced:engine:[version]"
 ```
 
-To start using ***source{d} Engine*** from the shell you must import everything inside the `tech.sourced.engine` package (or, if you prefer, just import `Engine` and `EngineDataFrame` classes):
+To start using **engine** from the shell you must import everything inside the `tech.sourced.engine` package (or, if you prefer, just import `Engine` and `EngineDataFrame` classes):
 
 ```bash
 scala> import tech.sourced.engine._
@@ -195,17 +200,41 @@ scala> engine.getRepositories.filter('id === "github.com/mawag/faq-xiyoulinux").
 
 ```
 
-# Playing around with source{d} Engine on Jupyter
+# Playing around with **engine** on Jupyter
 
 You can launch our docker container which contains some Notebooks examples just running:
 
-    docker run --name engine-jupyter --rm -it -p 8888:8888 -v $(pwd)/path/to/siva-files:/repositories --link bblfshd:bblfshd srcd/engine-jupyter
+    docker run --name engine-jupyter --rm -it -p 8080:8080 -v $(pwd)/path/to/siva-files:/repositories --link bblfshd:bblfshd srcd/engine-jupyter
 
 You must have some siva files in local to mount them on the container replacing the path `$(pwd)/path/to/siva-files`. You can get some siva-files from the project [here](https://github.com/src-d/engine/tree/master/examples/siva-files).
 
 You should have a [bblfsh daemon](https://github.com/bblfsh/bblfshd) container running to link the jupyter container (see Pre-requisites).
 
 When the `engine-jupyter` container starts it will show you an URL that you can open in your browser.
+
+# Using engine directly from Python
+
+If you are using engine directly from Python and are unable to modify the `PYTHON_SUBMIT_ARGS` you can copy the engine jar to the pyspark jars to make it available there.
+
+```
+cp engine.jar "$(python -c 'import pyspark; print(pyspark.__path__[0])'/jars"
+```
+
+This way, you can use it in the following way:
+
+```python
+import sys
+
+pyspark_path = "/path/to/pyspark/python"
+sys.path.append(pyspark_path)
+
+from pyspark.sql import SparkSession
+from sourced.engine import Engine
+
+siva_folder = "/path/to/siva-files"
+spark = SparkSession.builder.appName("test").master("local[*]").getOrCreate()
+engine = Engine(spark, siva_folder)
+```
 
 # Development
 
@@ -261,7 +290,7 @@ $ make docker-clean
 
 ## Run tests
 
-source{d} engine uses [bblfsh](https://github.com/bblfsh) so you need an instance of a bblfsh server running:
+**engine** uses [bblfsh](https://github.com/bblfsh) so you need an instance of a bblfsh server running:
 
 ```bash
 $ make docker-bblfsh

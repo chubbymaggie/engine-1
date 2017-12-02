@@ -28,7 +28,7 @@ BBLFSH_CONTAINER_VOLUME = /var/lib/bblfshd
 BBLFSH_IMAGE = bblfsh/bblfshd
 BBLFSH_VERSION = v2.1.2
 
-BBLFSH_RUN_FLAGS := --rm --name $(BBLFSH_CONTAINER_NAME) --privileged \
+BBLFSH_RUN_FLAGS := --detach --name $(BBLFSH_CONTAINER_NAME) --privileged \
 	-p $(BBLFSH_HOST_PORT):$(BBLFSH_CONTAINER_PORT) \
 	-v $(BBLFSH_HOST_VOLUME):$(BBLFSH_CONTAINER_VOLUME) \
 	$(BBLFSH_IMAGE):$(BBLFSH_VERSION)
@@ -68,8 +68,8 @@ JUPYTER_IMAGE_VERSIONED ?= $(call escape_docker_tag,$(JUPYTER_IMAGE):$(VERSION))
 
 # Docker run jupyter container
 JUPYTER_CONTAINER_NAME = engine-jupyter
-JUPYTER_HOST_PORT = 8888
-JUPYTER_CONTAINER_PORT = 8888
+JUPYTER_HOST_PORT = 8080
+JUPYTER_CONTAINER_PORT = 8080
 REPOSITORIES_HOST_DIR := $(PWD)/examples/siva-files
 REPOSITORIES_CONTAINER_DIR = /repositories
 JUPYTER_RUN_FLAGS := --name $(JUPYTER_CONTAINER_NAME) --rm -it \
@@ -154,6 +154,5 @@ docker-push: docker-build
 	fi;
 
 maven-release:
-	$(SBT) publishLocal && \
-	$(SBT) publishSigned && \
+	$(SBT) clean publishSigned && \
 	$(SBT) sonatypeRelease

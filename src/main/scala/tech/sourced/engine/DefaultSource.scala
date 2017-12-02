@@ -7,8 +7,8 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{Row, SQLContext, SparkSession}
 import org.apache.spark.{SparkException, UtilsWrapper}
 import tech.sourced.engine.iterator._
-import tech.sourced.engine.provider.{RepositoryProvider, SivaRDDProvider}
-import tech.sourced.engine.util.Filter
+import tech.sourced.engine.provider.{RepositoryProvider, RepositoryRDDProvider}
+import tech.sourced.engine.util.{CompiledFilter, Filter}
 
 /**
   * Default source to provide new git relations.
@@ -30,7 +30,8 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
       case "repositories" => Schema.repositories
       case "references" => Schema.references
       case "commits" => Schema.commits
-      case "files" => Schema.files
+      case "tree_entries" => Schema.treeEntries
+      case "blobs" => Schema.blobs
       case other => throw new SparkException(s"table '$other' is not supported")
     }
 
@@ -53,7 +54,7 @@ object DefaultSource {
   * Also, the [[GitOptimizer]] might merge some table sources into one by squashing joins, so the
   * result will be the resultant table chained with the previous one using chained iterators.
   *
-  * @param session             Spark session
+  * @param session        Spark session
   * @param schema         schema of the relation
   * @param joinConditions join conditions, if any
   * @param tableSource    source table if any
@@ -69,26 +70,27 @@ case class GitRelation(session: SparkSession,
   private val skipCleanup: Boolean = session.conf.
     get(skipCleanupKey, default = "false").toBoolean
 
-  // this is needed to be overriden to extend BaseRelataion,
-  // though is not much usefull since we have the SparkSession
+  // this needs to be overridden to extend BaseRelataion,
+  // though is not very useful since already we have the SparkSession
   override def sqlContext: SQLContext = session.sqlContext
 
   override def unhandledFilters(filters: Array[Filter]): Array[Filter] = {
     super.unhandledFilters(filters)
   }
 
-  override def buildScan(requiredColumns: Seq[Attribute], filters: Seq[Expression]): RDD[Row] = {
+  override def buildScan(requiredColumns: Seq[Attribute],
+                         filters: Seq[Expression]): RDD[Row] = {
     val sc = session.sparkContext
-    val sivaRDD = SivaRDDProvider(sc).get(path)
+    val reposRDD = RepositoryRDDProvider(sc).get(path)
 
     val requiredCols = sc.broadcast(requiredColumns.map(_.name).toArray)
     val reposLocalPath = sc.broadcast(localPath)
     val sources = sc.broadcast(GitRelation.getSources(tableSource, schema))
     val filtersBySource = sc.broadcast(GitRelation.getFiltersBySource(filters))
 
-    sivaRDD.flatMap(pds => {
+    reposRDD.flatMap(source => {
       val provider = RepositoryProvider(reposLocalPath.value, skipCleanup)
-      val repo = provider.get(pds)
+      val repo = provider.get(source)
 
       // since the sources are ordered by their hierarchy, we can chain them like this
       // using the last used iterator as input for the current one
@@ -117,18 +119,27 @@ case class GitRelation(session: SparkSession,
             filtersBySource.value.getOrElse(k, Seq())
           ))
 
-        case k@"files" =>
-          iter = Some(new BlobIterator(
+        case k@"tree_entries" =>
+          iter = Some(new TreeEntryIterator(
             requiredCols.value,
             repo,
             iter.map(_.asInstanceOf[CommitIterator]).orNull,
             filtersBySource.value.getOrElse(k, Seq())
           ))
 
+        case k@"blobs" =>
+          iter = Some(new BlobIterator(
+            requiredCols.value,
+            repo,
+            iter.map(_.asInstanceOf[TreeEntryIterator]).orNull,
+            filtersBySource.value.getOrElse(k, Seq())
+          ))
+
         case other => throw new SparkException(s"required cols for '$other' is not supported")
       })
 
-      new CleanupIterator(iter.getOrElse(Seq().toIterator), provider.close(pds.getPath()))
+      // FIXME: when the RDD is persisted to disk the last element of this iterator is closed twice
+      new CleanupIterator(iter.getOrElse(Seq().toIterator), provider.close(source, repo))
     })
   }
 }
@@ -145,8 +156,7 @@ private object GitRelation {
     * @param schema      resultant schema
     * @return sequence with table sources
     */
-  private def getSources(tableSource: Option[String],
-                         schema: StructType): Seq[String] =
+  private def getSources(tableSource: Option[String], schema: StructType): Seq[String] =
     tableSource match {
       case Some(ts) => Seq(ts)
       case None =>
@@ -162,7 +172,7 @@ private object GitRelation {
     * @param filters list of expression to compile the filters
     * @return compiled and grouped filters
     */
-  private def getFiltersBySource(filters: Seq[Expression]) =
+  private def getFiltersBySource(filters: Seq[Expression]): Map[String, Seq[CompiledFilter]] =
     filters.map(Filter.compile)
       .flatMap(_.filters)
       .map(e => (e.sources.distinct, e))
@@ -181,7 +191,8 @@ object Sources {
     "repositories",
     "references",
     "commits",
-    "files"
+    "tree_entries",
+    "blobs"
   )
 
   /**

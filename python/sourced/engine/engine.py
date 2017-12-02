@@ -1,6 +1,6 @@
-from __future__ import print_function
+import functools
 from py4j.java_gateway import java_import
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame
 
 
 class Engine(object):
@@ -28,7 +28,15 @@ class Engine(object):
         self.__jvm = self.session.sparkContext._gateway.jvm
         java_import(self.__jvm, 'tech.sourced.engine.Engine')
         java_import(self.__jvm, 'tech.sourced.engine.package$')
-        self.__engine = self.__jvm.tech.sourced.engine.Engine.apply(self.__jsparkSession, repos_path)
+
+        try:
+            self.__engine = self.__jvm.tech.sourced.engine.Engine.apply(self.__jsparkSession, repos_path)
+        except TypeError as e:
+            if 'JavaPackage' in e.message:
+                raise Exception("package \"tech.sourced:engine:<version>\" cannot be found. Please, provide a jar with the package or install the package using --packages")
+            else:
+                raise e
+
         if skip_cleanup:
             self.__engine.skipCleanup(True)
         self.__implicits = getattr(getattr(self.__jvm.tech.sourced.engine, 'package$'), 'MODULE$')
@@ -48,17 +56,17 @@ class Engine(object):
                                      self.session, self.__implicits)
 
 
-    def files(self, repository_ids=[], reference_names=[], commit_hashes=[]):
+    def blobs(self, repository_ids=[], reference_names=[], commit_hashes=[]):
         """
-        Retrieves the files of a list of repositories, reference names and commit hashes.
-        So the result will be a DataFrame of all the files in the given commits that are
+        Retrieves the blobs of a list of repositories, reference names and commit hashes.
+        So the result will be a DataFrame of all the blobs in the given commits that are
         in the given references that belong to the given repositories.
 
-        >>> files_df = engine.files(repo_ids, ref_names, hashes)
+        >>> blobs_df = engine.blobs(repo_ids, ref_names, hashes)
 
         Calling this function with no arguments is the same as:
 
-        >>> engine.repositories.references.commits.files
+        >>> engine.repositories.references.commits.first_reference_commit.tree_entries.blobs
 
         :param repository_ids: list of repository ids to filter by (optional)
         :type repository_ids: list of strings
@@ -66,7 +74,7 @@ class Engine(object):
         :type reference_names: list of strings
         :param commit_hashes: list of hashes to filter by (optional)
         :type commit_hashes: list of strings
-        :rtype: FilesDataFrame
+        :rtype: BlobsDataFrame
         """
         if not isinstance(repository_ids, list):
             raise Exception("repository_ids must be a list")
@@ -77,7 +85,7 @@ class Engine(object):
         if not isinstance(commit_hashes, list):
             raise Exception("commit_hashes must be a list")
 
-        return FilesDataFrame(self.__engine.getFiles(repository_ids,
+        return BlobsDataFrame(self.__engine.getBlobs(repository_ids,
                                                   reference_names,
                                                   commit_hashes),
                               self.session,
@@ -97,27 +105,9 @@ class Engine(object):
         return self.__implicits.parseUASTNode(data)
 
 
-def _custom_df_instance(func):
-    """
-    Wraps the resultant DataFrame of the method call with the class of self.
-
-    >>> @_custom_df_instance
-    >>> def method(self, *args, **kwargs):
-    >>>    return ParentClass.method(self, *args, **kwargs)
-    """
-    def _wrapper(self, *args, **kwargs):
-        dataframe = func(self, *args, **kwargs)
-        if self.__class__ != SourcedDataFrame\
-          and isinstance(self, SourcedDataFrame)\
-          and isinstance(dataframe, DataFrame):
-            return self.__class__(dataframe._jdf, self._session, self._implicits)
-        return dataframe
-    return _wrapper
-
-
 class SourcedDataFrame(DataFrame):
     """
-    Custom source{d} Engine DataFrame that contains some DataFrame overriden methods and 
+    Custom source{d} Engine DataFrame that contains some DataFrame overriden methods and
     utilities. This class should not be used directly, please get your SourcedDataFrames
     using the provided methods.
 
@@ -139,185 +129,70 @@ class SourcedDataFrame(DataFrame):
     def _engine_dataframe(self):
         return self._implicits.EngineDataFrame(self._jdf)
 
-
-    @_custom_df_instance
-    def checkpoint(self, *args, **kwargs):
-        return DataFrame.checkpoint(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def withWatermark(self, *args, **kwargs):
-        return DataFrame.withWatermark(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def hint(self, *args, **kwargs):
-        return DataFrame.hint(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def limit(self, *args, **kwargs):
-        return DataFrame.limit(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def coalesce(self, *args, **kwargs):
-        return DataFrame.coalesce(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def repartition(self, *args, **kwargs):
-        return DataFrame.repartition(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def distinct(self):
-        return DataFrame.distinct(self)
-
-
-    @_custom_df_instance
-    def sample(self, *args, **kwargs):
-        return DataFrame.sample(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def sampleBy(self, *args, **kwargs):
-        return DataFrame.sampleBy(self, *args, **kwargs)
-
-
-    def randomSplit(self, *args, **kwargs):
-        df_list = DataFrame.randomSplit(self, *args, **kwargs)
-        if self.__class__ != SourcedDataFrame and isinstance(self, SourcedDataFrame):
-            return [self.__class__(df._jdf, self._session, self._implicits) for df in df_list]
-        return df_list
-
-
-    @_custom_df_instance
-    def alias(self, *args, **kwargs):
-        return DataFrame.alias(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def crossJoin(self, other):
-        return DataFrame.crossJoin(self, other)
-
-
-    @_custom_df_instance
-    def join(self, *args, **kwargs):
-        return DataFrame.join(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def sortWithinPartitions(self, *args, **kwargs):
-        return DataFrame.sortWithinPartitions(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def sort(self, *args, **kwargs):
-        return DataFrame.sort(self, *args, **kwargs)
-
-
-    orderBy = sort
-
-
-    @_custom_df_instance
-    def describe(self, *args, **kwargs):
-        return DataFrame.describe(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def summary(self, *args, **kwargs):
-        return DataFrame.summary(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def select(self, *args, **kwargs):
-        return DataFrame.select(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def selectExpr(self, *args, **kwargs):
-        return DataFrame.selectExpr(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def filter(self, *args, **kwargs):
-        return DataFrame.filter(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def union(self, *args, **kwargs):
-        return DataFrame.union(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def unionByName(self, *args, **kwargs):
-        return DataFrame.unionByName(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def intersect(self, *args, **kwargs):
-        return DataFrame.intersect(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def subtract(self, *args, **kwargs):
-        return DataFrame.subtract(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def dropDuplicates(self, *args, **kwargs):
-        return DataFrame.dropDuplicates(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def dropna(self, *args, **kwargs):
-        return DataFrame.dropna(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def fillna(self, *args, **kwargs):
-        return DataFrame.fillna(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def replace(self, *args, **kwargs):
-        return DataFrame.replace(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def crosstab(self, *args, **kwargs):
-        return DataFrame.crosstab(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def freqItems(self, *args, **kwargs):
-        return DataFrame.freqItems(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def withColumn(self, *args, **kwargs):
-        return DataFrame.withColumn(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def withColumnRenamed(self, *args, **kwargs):
-        return DataFrame.withColumnRenamed(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def drop(self, *args, **kwargs):
-        return DataFrame.drop(self, *args, **kwargs)
-
-
-    @_custom_df_instance
-    def toDF(self, *args, **kwargs):
-        return DataFrame.toDF(self, *args, **kwargs)
-
-
+    def __generate_method(name):
+        """
+        Wraps the DataFrame's original method by name to return the derived class instance.
+        """
+        try:
+            func = getattr(DataFrame, name)
+        except AttributeError as e:
+            # PySpark version is too old
+            def func(self, *args, **kwargs):
+                raise e
+            return func
+        wraps = getattr(functools, "wraps", lambda _: lambda f: f)  # py3.4+
+
+        @wraps(func)
+        def _wrapper(self, *args, **kwargs):
+            dataframe = func(self, *args, **kwargs)
+            if self.__class__ != SourcedDataFrame \
+                    and isinstance(self, SourcedDataFrame) \
+                    and isinstance(dataframe, DataFrame):
+                return self.__class__(dataframe._jdf, self._session, self._implicits)
+            return dataframe
+
+        return _wrapper
+
+    # The following code wraps all the methods of DataFrame as of 2.3
+    alias = __generate_method("alias")
+    checkpoint = __generate_method("checkpoint")
+    coalesce = __generate_method("coalesce")
+    crossJoin = __generate_method("crossJoin")
+    crosstab = __generate_method("crosstab")
+    describe = __generate_method("describe")
+    distinct = __generate_method("distinct")
+    dropDuplicates = __generate_method("dropDuplicates")
     drop_duplicates = dropDuplicates
-
+    drop = __generate_method("drop")
+    dropna = __generate_method("dropna")
+    fillna = __generate_method("fillna")
+    filter = __generate_method("filter")
+    freqItems = __generate_method("freqItems")
+    hint = __generate_method("hint")
+    intersect = __generate_method("intersect")
+    join = __generate_method("join")
+    limit = __generate_method("limit")
+    randomSplit = __generate_method("randomSplit")
+    repartition = __generate_method("repartition")
+    replace = __generate_method("replace")
+    sampleBy = __generate_method("sampleBy")
+    sample = __generate_method("sample")
+    selectExpr = __generate_method("selectExpr")
+    select = __generate_method("select")
+    sort = __generate_method("sort")
+    orderBy = sort
+    sortWithinPartitions = __generate_method("sortWithinPartitions")
+    subtract = __generate_method("subtract")
+    summary = __generate_method("summary")
+    toDF = __generate_method("toDF")
+    unionByName = __generate_method("unionByName")
+    union = __generate_method("union")
     where = filter
+    withColumn = __generate_method("withColumn")
+    withColumnRenamed = __generate_method("withColumnRenamed")
+    withWatermark = __generate_method("withWatermark")
+
+    __generate_method = staticmethod(__generate_method)  # to make IntelliSense happy
 
 
 class RepositoriesDataFrame(SourcedDataFrame):
@@ -349,6 +224,30 @@ class RepositoriesDataFrame(SourcedDataFrame):
         """
         return ReferencesDataFrame(self._engine_dataframe.getReferences(),
                                    self._session, self._implicits)
+
+
+    @property
+    def head_ref(self):
+        """
+        Filters the current DataFrame references to only contain those rows whose reference is HEAD.
+
+        >>> heads_df = repos_df.head_ref
+
+        :rtype: ReferencesDataFrame
+        """
+        return self.references.ref('refs/heads/HEAD')
+
+
+    @property
+    def master_ref(self):
+        """
+        Filters the current DataFrame references to only contain those rows whose reference is master.
+
+        >>> master_df = repos_df.master_ref
+
+        :rtype: ReferencesDataFrame
+        """
+        return self.references.ref('refs/heads/master')
 
 
 class ReferencesDataFrame(SourcedDataFrame):
@@ -415,21 +314,30 @@ class ReferencesDataFrame(SourcedDataFrame):
 
         >>> commits_df = refs_df.commits
 
+        Take into account that getting all the commits will lead to a lot of repeated tree
+        entries and blobs, thus making your query very slow.
+        Most of the time what you probably want is to get the latest state of the files in
+        a specific reference.
+        You can use first_reference_commit for that purpose, which only gets the first
+        commit of a reference, that is, the latest status of the reference.
+
+        >>> commits_df = refs_df.commits.first_reference_commit
+
         :rtype: CommitsDataFrame
         """
         return CommitsDataFrame(self._engine_dataframe.getCommits(), self._session, self._implicits)
 
 
     @property
-    def files(self):
+    def blobs(self):
         """
-        Returns this DataFrame joined with the files DataSource.
+        Returns this DataFrame joined with the blobs DataSource.
 
-        >>> files_df = refs_df.files
+        >>> blobs_df = refs_df.blobs
 
-        :rtype: FilesDataFrame
+        :rtype: BlobsDataFrame
         """
-        return FilesDataFrame(self._engine_dataframe.getFiles(), self._session, self._implicits)
+        return BlobsDataFrame(self._engine_dataframe.getBlobs(), self._session, self._implicits)
 
 
 class CommitsDataFrame(SourcedDataFrame):
@@ -473,21 +381,65 @@ class CommitsDataFrame(SourcedDataFrame):
 
 
     @property
-    def files(self):
+    def tree_entries(self):
         """
-        Returns this DataFrame joined with the files DataSource.
+        Returns this DataFrame joined with the tree entries DataSource.
 
-        >>> files_df = commits_df.FilesDataFrame
+        >>> entries_df = commits_df.tree_entries
 
-        :rtype: FilesDataFrame
+        :rtype: TreeEntriesDataFrame
         """
-        return FilesDataFrame(self._engine_dataframe.getFiles(), self._session, self._implicits)
+        return TreeEntriesDataFrame(self._engine_dataframe.getTreeEntries(), self._session, self._implicits)
 
 
-class FilesDataFrame(SourcedDataFrame):
+    @property
+    def blobs(self):
+        """
+        Returns a new DataFrame with the blob associated to each tree entry of the commit.
+
+        >>> > blobs_df = commits_df.blobs
+
+        :rtype: BlobsDataFrame
+        """
+        return BlobsDataFrame(self._engine_dataframe.getBlobs(), self._session,
+                                self._implicits)
+
+
+class TreeEntriesDataFrame(SourcedDataFrame):
     """
-    DataFrame containing files data.
-    This class should not be instantiated directly, please get your FilesDataFrame using the
+    DataFrame with tree entries data data.
+    This class should not be instantiated directly, please get your TreeEntriesDataFrame using the
+    provided methods.
+
+    :param jdf: Java DataFrame
+    :type jdf: py4j.java_gateway.JavaObject
+    :param session: Spark Session to use
+    :type session: pyspark.sql.SparkSession
+    :param implicits: Implicits object from Scala
+    :type implicits: py4j.java_gateway.JavaObject
+    """
+
+    def __init__(self, jdf, session, implicits):
+        SourcedDataFrame.__init__(self, jdf, session, implicits)
+
+
+    @property
+    def blobs(self):
+        """
+        Returns a new DataFrame with the blob associated to each tree entry.
+
+        >>> > blobs_df = trees_df.blobs
+
+        :rtype: BlobsDataFrame
+        """
+        return BlobsDataFrame(self._engine_dataframe.getBlobs(), self._session,
+                              self._implicits)
+
+
+class BlobsDataFrame(SourcedDataFrame):
+    """
+    DataFrame containing blobs data.
+    This class should not be instantiated directly, please get your BlobsDataFrame using the
     provided methods.
 
     :param jdf: Java DataFrame
@@ -504,23 +456,23 @@ class FilesDataFrame(SourcedDataFrame):
 
     def classify_languages(self):
         """
-        Returns a new DataFrame with the language data of any file added to
+        Returns a new DataFrame with the language data of any blob added to
         its row.
 
-        >>> files_lang_df = files_df.classify_languages
+        >>> blobs_lang_df = blobs_df.classify_languages
 
-        :rtype: FilesWithLanguageDataFrame
+        :rtype: BlobsWithLanguageDataFrame
         """
-        return FilesWithLanguageDataFrame(self._engine_dataframe.classifyLanguages(),
+        return BlobsWithLanguageDataFrame(self._engine_dataframe.classifyLanguages(),
                                           self._session, self._implicits)
 
 
     def extract_uasts(self):
         """
-        Returns a new DataFrame with the parsed UAST data of any file added to
+        Returns a new DataFrame with the parsed UAST data of any blob added to
         its row.
 
-        >>> files_df.extract_uasts
+        >>> blobs_df.extract_uasts
 
         :rtype: UASTsDataFrame
         """
@@ -528,10 +480,10 @@ class FilesDataFrame(SourcedDataFrame):
                               self._session, self._implicits)
 
 
-class FilesWithLanguageDataFrame(SourcedDataFrame):
+class BlobsWithLanguageDataFrame(SourcedDataFrame):
     """
-    DataFrame containing files and language data.
-    This class should not be instantiated directly, please get your FilesWithLanguageDataFrame
+    DataFrame containing blobs and language data.
+    This class should not be instantiated directly, please get your BlobsWithLanguageDataFrame
     using the provided methods.
 
     :param jdf: Java DataFrame
@@ -548,10 +500,10 @@ class FilesWithLanguageDataFrame(SourcedDataFrame):
 
     def extract_uasts(self):
         """
-        Returns a new DataFrame with the parsed UAST data of any file added to
+        Returns a new DataFrame with the parsed UAST data of any blob added to
         its row.
 
-        >>> files_lang_df.extract_uasts
+        >>> blobs_lang_df.extract_uasts
 
         :rtype: UASTsDataFrame
         """

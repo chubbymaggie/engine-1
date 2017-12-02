@@ -2,7 +2,7 @@ package tech.sourced
 
 import gopkg.in.bblfsh.sdk.v1.uast.generated.Node
 import org.apache.spark.SparkException
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import tech.sourced.engine.udf._
 
 /**
@@ -82,6 +82,8 @@ package object engine {
 
     import df.sparkSession.implicits._
 
+    implicit val session = df.sparkSession
+
     /**
       * Returns a new [[org.apache.spark.sql.DataFrame]] with the product of joining the
       * current dataframe with the references dataframe.
@@ -110,6 +112,18 @@ package object engine {
       *
       * {{{
       * val commitDf = refsDf.getCommits
+      * }}}
+      *
+      * Take into account that getting all the commits will lead to a lot of repeated tree
+      * entries and blobs, thus making your query very slow.
+      * Most of the time what you probably want is to get the latest state of the files in
+      * a specific reference.
+      * You can use [[tech.sourced.engine.EngineDataFrame#getFirstReferenceCommit]] for
+      * that purpose, which only gets the first commit of a reference, that is, the latest
+      * status of the reference.
+      *
+      * {{{
+      * val commitsDf = refsDf.getCommits.getFirstReferenceCommit
       * }}}
       *
       * @return new DataFrame containing also commits data.
@@ -147,25 +161,42 @@ package object engine {
 
     /**
       * Returns a new [[org.apache.spark.sql.DataFrame]] with the product of joining the
-      * current dataframe with the files dataframe.
+      * current dataframe with the tree entries dataframe.
       *
       * {{{
-      * val filesDf = commitsDf.getFiles
+      * val entriesDf = commitsDf.getTreeEntries
       * }}}
       *
-      * @return new DataFrame containing also files data.
+      * @return new DataFrame containing also tree entries data.
       */
-    def getFiles: DataFrame = {
-      val filesDf = getDataSource("files", df.sparkSession)
+    def getTreeEntries: DataFrame = {
+      checkCols(df, "index", "hash") // references also has hash, index makes sure that is commits
+      val commitsDf = df.select("hash")
+      val entriesDf = getDataSource("tree_entries", df.sparkSession)
+      entriesDf.join(commitsDf, entriesDf("commit_hash") === commitsDf("hash"))
+        .drop($"hash")
+    }
 
-      if (df.schema.fieldNames.contains("index")) {
-        val commitsDf = df.select("hash")
-        filesDf.join(commitsDf, filesDf("commit_hash") === commitsDf("hash"))
-          .drop($"hash")
-          .distinct()
+    /**
+      * Returns a new [[org.apache.spark.sql.DataFrame]] with the product of joining the
+      * current dataframe with the blobs dataframe. If the current dataframe does not contain
+      * the tree entries data, getTreeEntries will be called automatically.
+      *
+      * {{{
+      * val blobsDf = treeEntriesDf.getBlobs
+      * val blobsDf2 = commitsDf.getBlobs // can be obtained from commits too
+      * }}}
+      *
+      * @return new DataFrame containing also blob data.
+      */
+    def getBlobs: DataFrame = {
+      if (!df.columns.contains("blob")) {
+        df.getTreeEntries.getBlobs
       } else {
-        checkCols(df, "name")
-        df.getCommits.getFiles
+        val treesDf = df.select("path", "blob")
+        val blobsDf = getDataSource("blobs", df.sparkSession)
+        blobsDf.join(treesDf, treesDf("blob") === blobsDf("blob_id"))
+          .drop($"blob")
       }
     }
 
@@ -227,10 +258,7 @@ package object engine {
       */
     def classifyLanguages: DataFrame = {
       checkCols(df, "is_binary", "path", "content")
-      df.withColumn(
-        "lang",
-        ClassifyLanguagesUDF.function(df.sparkSession)('is_binary, 'path, 'content)
-      )
+      df.withColumn("lang", ClassifyLanguagesUDF('is_binary, 'path, 'content))
     }
 
     /**
@@ -247,14 +275,13 @@ package object engine {
       */
     def extractUASTs(): DataFrame = {
       checkCols(df, "path", "content")
-      if (df.columns.contains("lang")) {
-        df.withColumn(
-          "uast",
-          ExtractUASTsUDF.functionWithLang(df.sparkSession)('path, 'content, 'lang)
-        )
+      val lang: Column = if (df.columns.contains("lang")) {
+        df("lang")
       } else {
-        df.withColumn("uast", ExtractUASTsUDF.function(df.sparkSession)('path, 'content))
+        null
       }
+
+      df.withColumn("uast", ExtractUASTsUDF('path, 'content, lang))
     }
 
     /**
@@ -295,10 +322,8 @@ package object engine {
         throw new SparkException(s"DataFrame already contains a column named $outputColumn")
       }
 
-      df.withColumn(
-        outputColumn,
-        QueryXPathUDF(df.sparkSession, query)(df(queryColumn))
-      )
+      import org.apache.spark.sql.functions.lit
+      df.withColumn(outputColumn, QueryXPathUDF(df(queryColumn), lit(query)))
     }
 
     /**
@@ -321,7 +346,7 @@ package object engine {
         throw new SparkException(s"DataFrame already contains a column named $outputColumn")
       }
 
-      df.withColumn(outputColumn, ExtractTokensUDF()(df(queryColumn)))
+      df.withColumn(outputColumn, ExtractTokensUDF(df(queryColumn)))
     }
 
   }
@@ -364,8 +389,10 @@ package object engine {
       */
     val UDFtoRegister: List[CustomUDF] = List(
       ClassifyLanguagesUDF,
-      ExtractUASTsUDF,
-      QueryXPathUDF
+      ExtractUASTsWithoutLangUDF,
+      ExtractUASTsWithLangUDF,
+      QueryXPathUDF,
+      ExtractTokensUDF
     )
   }
 
